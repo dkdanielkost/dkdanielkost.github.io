@@ -1,0 +1,140 @@
+
+---
+title: "Visualization and Prediction of NYC 311 Complaint Data"
+author: "Daniel Nachajon, Manu Singh ,Uday bhaskar, Yimei Liu ,Tianhao Lu, Daniel Kost, Daniel Ramirez"
+output: html_document
+---
+** Code Part 1, Prediction**
+<br>
+```{r warning=FALSE, echo=FALSE, results='hide', message=FALSE}
+#################
+# Setup
+#################
+# Load libraries
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(ggmap)
+library(maps)
+library(lubridate)
+library(googleVis)
+library(leaflet)
+
+setwd(dir = "/Users/millenium/Documents/Columbia/visualization/Project_4/")
+load(paste(getwd(),"Data311.RData",sep="/"))
+```
+<br>
+<h1>Introduction</h1>
+<br>
+In this work, we assumed the the task of both predicting and quickly dissecting the 311 NYC call volume data set. There are several viable ways to make in-roads in this work, including triaging by Agency and Complaint Type. Ultimately, we were interested in teasing out macro behaviors and began our explorations without any strong bias beforehand. Certain salient aspects were easily distilled: annual seasonality (different by agency), the importance of the actual day of the week and intra-day patterns. Our team successfully applied random forest regression to predict next-day call volume by complaint type; this process was largely influenced by the day of the week, weather and trailing call volume. This process revealed several clusters of agency-complaints with high correlation. Departing from the need to distill macro behaviors, we also explored the comportment of one, rather unique complaint: Grafitti. This complaint hints as certain societal and generation norm differences.
+
+
+<br>
+We plot a time series by agency, by year. In this plot We discovered a seasonal pattern. It has a similar behavior in each year. The number of complains increases in winter and decreases in summer. 
+
+```{r warning=FALSE,  message=FALSE,echo=FALSE}
+#Read and Clean
+colnames(data)<- tolower(sub(" ", ".", colnames(data)))
+data[,'date_c']<-as.Date(mdy_hms(data$created.date))
+g.data=subset(data,select=c("date_c","borough","agency","complaint.type"))
+# Agency in the Time
+grp <- g.data %>%
+  group_by(date_c,agency) %>%
+  filter(year(date_c) == 2015)%>%
+  summarise(sum=n()) %>%
+  arrange(desc(sum)) %>%
+  head(5)
+agenncy.top<-as.character( grp$agency)
+grp <- g.data %>%
+  filter(agency %in% agenncy.top)%>%
+  group_by(date_c,agency) %>%
+  summarise(sum=n()) %>%
+  arrange(desc(sum))
+
+plot<-ggplot(data=grp,aes(x=date_c,y=sum)) + 
+  geom_line(aes(y=sum,colour=agency),size=1.25)+
+  labs(x="Time",y="Number of Complaints") 
+plot
+
+```
+<br>
+Additionally we explored the distribution of complaints per day for the entire time frame to discern if we have any obviously trends which might hint concentration on some particular days. The calendar chart helps us visualize not just the distribution per day, but per month every year to detect any seasonal patterns.
+
+
+Our second question is if the number of complaints could be explained by geographical information, particularly where occur them. In the following map we show May of 2015, We could recognize an important number of complaints in downtown Manhattan and uptown.
+<br>
+
+
+```{r warning=FALSE,  message=FALSE,echo=FALSE}
+#Maps and Time
+g.data2=subset(data,select=c("date_c","longitude","latitude"))
+grp <- g.data2 %>%
+  filter(year(date_c) == 2015,month(date_c)==5,longitude!=0)%>%
+  mutate(longitude = round(longitude, 3), latitude = round(latitude, 3)) 
+nk.map <- leaflet() %>% 
+  addTiles() %>% 
+  setView(-73.9712, 40.7831, zoom = 12) %>% 
+  addMarkers(data = grp, lng = ~ longitude, lat = ~ latitude,
+             clusterOptions = markerClusterOptions() )
+nk.map
+```
+
+<br>
+Now, we know that time and position are some important factors in the number of requirements. However there are additional variables or interactions that can explain the behavior of our complaints such as, the borough and the type of requirement.
+<br>
+Using GoogleViz, we can combine our plots to create an interactive dashboard. Our first conclusion is that 311 data have top ten important complaints that represent more than fifty percent of all of them. In addition We use a tree Map to represent the number of complaints by borough. This can show us that the complaints in Queens are related with street condition, but eh others claim by Heating. You can click on the interest subject and return with right click on the gray header.
+
+
+```{r warning=FALSE,  message=FALSE,echo=FALSE}
+# Top request by City
+tot=dim(g.data)[1]
+g.data[,'tot']=as.array(rep.int(tot, tot))
+grp <- g.data %>%
+  group_by(tolower(borough)) %>%
+  summarise(cant=n(),porc=n()/min(tot)) %>%
+  arrange(desc(cant))
+pie<-gvisPieChart(grp,"city",'cant')
+#Tree Map
+grp2 <- g.data %>%
+  group_by(city=tolower(borough),ctype=tolower(complaint.type)) %>%
+  summarise(cant=n(),porc=n()/min(tot)) %>%
+  arrange(desc(cant))
+
+grp3 <- g.data %>%
+  group_by(ctype=tolower(borough)) %>%
+  summarise(cant=n(),porc=n()/min(tot)) %>%
+  arrange(desc(cant))
+n=dim(grp3)[1]
+grp3[,'city']=rep('NY', n)
+n=dim(grp2)[1]
+test<-as.array(paste(seq(1,n),grp2$ctype,sep="_"))
+length(grp2$ctype)
+grp2$ctype<-test
+total.df= data_frame(ctype='NY',city=NA,cant=tot)
+grp4=rbind (grp2  %>% select(city,ctype,cant) ,
+      grp3  %>% select(city,ctype,cant),total.df) 
+
+
+treeMap<-gvisTreeMap(grp4,idvar="ctype",parentvar ="city",sizevar='cant',
+                     colorvar ='cant',
+                     options=list(showScale=TRUE,useWeightedAverageForAggregation=TRUE,
+                     highlightOnMouseOver=TRUE,maxPostDepth=2,minColor='#009688',
+                                  midColor= '#f7f7f7',
+                                  maxColor= '#ee8100',width=420, height=520))
+
+grp5 <- g.data %>%
+  group_by(ctype=tolower(complaint.type)) %>%
+  summarise(cant=n(),porc=n()/min(tot)) %>%
+  arrange(desc(cant)) %>%
+  mutate(ctype=ifelse(porc > 0.02, ctype,'other')) %>%
+  group_by(ctype) %>%
+  summarise(cant=sum(cant))  
+bar <- gvisBarChart(grp5, yvar="cant", xvar="ctype",                  
+                  options=list(width=320, height=350, legend='none',
+                               chartArea= "{left:120, width: 300}" ))
+GV <- gvisMerge(pie,bar, horizontal=FALSE)
+GT <- gvisMerge(GV,treeMap, horizontal=TRUE)
+plot(GT) 
+cat(GT$html$chart, file="dashBoard.html")
+```
+<iframe width="1300" height="600" frameborder="0" src = 'dashBoard.html' ></iframe>

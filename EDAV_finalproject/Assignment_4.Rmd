@@ -1,0 +1,440 @@
+---
+title: "Data Vis HW4"
+author: "Daniel Kost-Stephenson"
+date: "April 3, 2016"
+output: html_document
+---
+
+```{r, echo=FALSE, include=F}
+library(ggplot2)
+library(scatterplot3d)
+library(googleVis)
+library(RColorBrewer)
+library(dplyr)
+library(plotly)
+library(reshape2)
+library(choroplethr)
+library(choroplethrZip)
+library(leaflet)
+library(ggmap)
+library(lubridate)
+library(gridExtra)
+```
+
+```{r,echo=F}
+setwd("C:/Users/SONY/Desktop/Data Visualization/final project/writeup_combined")
+raw_dat=readRDS("the311.RDS")
+data("zip.regions")
+data("df_pop_zip")
+sub <- raw_dat
+```
+
+```{r, echo=F}
+
+# Convert to Date
+sub$Created.Date <- as.POSIXct(sub$Created.Date, format = "%m/%d/%Y %I:%M:%S %p")
+sub$hour <- hour(sub$Created.Date)
+sub$min <- minute(sub$Created.Date)
+sub$sec <- second(sub$Created.Date)
+sub$hms <- format(sub$Created.Date, format = "%I:%M:%S %p")
+sub$date <- format(sub$Created.Date, format = "%m/%d")
+sub$Complaint.Type <- as.character(sub$Complaint.Type)
+
+#Clean Zip codes
+sub$Incident.Zip <- as.numeric(substr(sub$Incident.Zip, 1,5))
+nyc_fips <- c(36005, 36047, 36061, 36081, 36085)
+ziplist <- zip.regions %>% filter(county.fips.numeric %in% nyc_fips) %>% select(region)
+ziplist <- as.vector(ziplist$region)
+
+# Data for agency
+filt_dat <- sub %>% filter(Created.Date >= '2015-01-01' & Created.Date <= '2015-12-31') %>% group_by(Agency, region = Incident.Zip) %>% summarise(count = n()) %>% arrange(-count)
+filt_dat[filt_dat==''] <- NA
+filt_dat <- na.omit(filt_dat)
+filt_dat$region <- as.character(filt_dat$region)
+
+names(df_pop_zip)[2] <- "pop"
+filt_dat <- na.omit(left_join(filt_dat,df_pop_zip, by=c("region"="region")))
+
+# Data for Complaint type
+filt_dat2 <- sub %>% filter(Created.Date >= '2015-01-01' & Created.Date <= '2015-12-31') %>% group_by(Complaint.Type, region = Incident.Zip) %>% summarise(count = n()) %>% arrange(-count)
+filt_dat2[filt_dat2==''] <- NA
+filt_dat2 <- na.omit(filt_dat2)
+filt_dat2$region <- as.character(filt_dat2$region)
+
+names(df_pop_zip)[2] <- "pop"
+filt_dat2 <- na.omit(left_join(filt_dat2,df_pop_zip, by=c("region"="region")))
+```
+
+```{r, echo=F, warning=F}
+zip_choro_ag <- function(ny_agency, filt_dat) {
+  
+  if (ny_agency=="all") {
+    mapdat <- filt_dat %>% group_by(region) %>% summarise(count = sum(count), pop = sum(pop)) %>% mutate(value=count/pop)
+    mapdat[mapdat=="Inf"] <- NA
+    mapdat <- na.omit(mapdat)
+  } else {
+    mapdat <- filt_dat %>% filter(Agency == ny_agency) %>% group_by (region) %>% mutate(value = count/pop)
+    mapdat[mapdat=="Inf"] <- NA
+    mapdat <- na.omit(mapdat)
+  }
+  
+  nyc_fips = c(36005, 36047, 36061, 36081, 36085)
+  
+  choro = ZipChoropleth$new(mapdat)
+  choro$title = paste("Number of", ny_agency, "Complaints")
+  choro$ggplot_scale = scale_fill_brewer(name="Complaints per Capita", palette="YlOrRd", drop=FALSE, na.value="white")
+  choro$set_zoom_zip(state_zoom=NULL, county_zoom=nyc_fips, msa_zoom=NULL, zip_zoom=NULL)
+  choro$render()
+}
+
+zip_choro_type <- function(complaint, filt_dat) {
+  
+  if (complaint=="all") {
+    mapdat <- filt_dat %>% group_by(region) %>% summarise(count = sum(count), pop = sum(pop)) %>% mutate(value=count/pop)
+    mapdat[mapdat=="Inf"] <- NA
+    mapdat <- na.omit(mapdat)
+  } else {
+    mapdat <- filt_dat %>% filter(Complaint.Type == complaint) %>% mutate(value = count/pop)
+    mapdat[mapdat=="Inf"] <- NA
+    mapdat <- na.omit(mapdat)
+  }
+  
+  nyc_fips = c(36005, 36047, 36061, 36081, 36085)
+  
+  name = paste("Number of", complaint, "Complaints")
+  fname = paste(name,".png", sep="")
+  
+  choro = ZipChoropleth$new(mapdat)
+  choro$title = name
+  choro$ggplot_scale = scale_fill_brewer(name="Complaints per Capita", palette="YlOrRd", drop=FALSE, na.value="white")
+  choro$set_zoom_zip(state_zoom=NULL, county_zoom=nyc_fips, msa_zoom=NULL, zip_zoom=NULL)
+  choro$render()
+  #ggsave(fname)
+}
+```
+
+```{r, echo=F, eval=F}
+# Top 6 agencies are HPD, NYPD, DOT, DEP, DSNY, DOB
+leaf_dat <- sub %>% filter(Created.Date >= '2015-01-01' & Created.Date <= '2015-12-31') %>% group_by(Agency, Complaint.Type) %>% summarise(count = n()) %>% arrange(-count)
+leaf_dat
+sum(leaf_dat$count)
+length(unique(leaf_dat$Agency))
+# Most common agencies
+sub %>% filter(Created.Date >= '2015-01-01' & Created.Date <= '2015-12-31') %>% group_by(Agency) %>% summarise(count=n()) %>% arrange(-count)
+# Most common complaints
+types <- sub %>% filter(Created.Date >= '2015-01-01' & Created.Date <= '2015-12-31') %>% group_by(Complaint.Type) %>% summarise(count=n()) %>% arrange(-count)
+
+leaf_dat <- sub %>% filter(Created.Date >= '2016-03-01' & Created.Date <= '2016-03-31' & Agency == "NYPD") %>% select(Agency, lat = Latitude, lon = Longitude, Complaint.Type)
+head(leaf_dat)
+leaf_dat <- na.omit(leaf_dat)
+dim(leaf_dat)
+```
+
+```{r, echo=F, eval=F}
+#First gif
+
+ag_list=c("HPD", "NYPD", "DOT", "DEP", "DSNY", "DOB")
+
+ag_dat <- sub %>% filter(Created.Date >= '2015-01-01' & Created.Date <= '2015-12-31') %>% filter(Agency %in% ag_list) %>% filter(ifelse((hour==0 & min==0 & sec ==0),0,1) == 1) %>% select(Agency, hour, lat = Latitude, lon = Longitude)
+ag_dat <- na.omit(ag_dat)
+
+NY <- get_map(location="New York City", zoom=11, source="google")
+NY2 <- get_map(location="New York City", zoom=11, maptype="toner", source="stamen")
+ggmap(NY2)
+
+setwd("C:\\Users\\Daniel\\Desktop\\CU\\Data Viz\\Assignment 4\\Agency GIF")
+for (i in 0:23) {
+  fname = paste(i,".png", sep="")
+  mapdat <- ag_dat %>% filter(hour == i)
+  map <- ggmap(NY, base_layer = ggplot(data = mapdat, aes(x=lon, y=lat, color=Agency))) +
+    geom_point(alpha=0.1) +
+    scale_color_brewer(palette = "Dark2", guide=FALSE) +
+    facet_wrap(~ Agency) +
+    labs(x="Longitude", y="Latitude", title = paste("Reports at",i,"h"))
+  fname = paste(i,".png", sep="")
+  ggsave(map, file=fname)
+}
+```
+
+```{r, echo=F, eval=F}
+test <- sub %>% filter(Created.Date >= '2015-01-01' & Created.Date <= '2015-12-31') %>% filter(Agency %in% ag_list) %>% filter(ifelse((hour==0 & min==0 & sec ==0),0,1) == 1) %>% select(Agency, hour, lat = Latitude, lon = Longitude) %>% group_by(Agency, hour) %>% summarise(count=n())
+test <- na.omit(test)
+head(test)
+```
+
+An animated GIF was created to illustrate the average variability of complaints throughout the course of a day. To create the plot, we aggregated complaints by hour over all days in 2015. Thus, the resulting graphic shows the total number of complaints for the top six agencies (by complaint volume) by hour in 2015. Each of the six agencies has a map displaying the georaphic location of complaints, as well as a histogram displaying the number of calls per hour. Unsurprisingly, all agencies except the NYPD see an increase in call volume throughout the daytime and a sharp decrease at night. Complaints to the NYPD actually peak between the hours of 10 pm to 1 am, possibly due to the nature of complaints they handle: noise, burglaries and assaults (to name a few), all of which occur more frequently at night.
+
+```{r, echo=F, eval=F}
+setwd("C:\\Users\\Daniel\\Desktop\\CU\\Data Viz\\Assignment 4\\Agency GIF2")
+
+createhist <- function(data, agency_list, ind, lightlist, darklist){
+  
+  hist <- ggplot(data, aes(x=factor(hour), y=count, fill = factor(col))) +
+    geom_bar(stat="identity",color="black") +
+    scale_fill_manual(values = c(lightlist[ind], darklist[ind]), guide=F) +
+    scale_y_continuous(breaks=NULL) +
+    labs(title=agency_list[ind]) +
+    theme(axis.title.x=element_blank(), axis.title.y = element_blank()) +
+    coord_flip()
+  return (hist)
+}
+
+darklist <- brewer.pal(6, "Dark2")
+lightlist <- brewer.pal(6, "Pastel2")
+map <- list()
+hist <- list()
+for (i in 0:23) {
+  for (j in 1:6) {
+    histdat <- ag_dat %>% filter(Agency==ag_list[j]) %>% group_by(Agency, hour) %>% summarise(count=n())
+    histdat$col <- ifelse(histdat$hour==i,1, 0)
+    mapdat <- ag_dat %>% filter(hour == i, Agency==ag_list[j])
+    
+    map[[j]] <- ggmap(NY, base_layer = ggplot(data = mapdat, aes(x=lon, y=lat))) +
+      geom_point(alpha=0.1,color=darklist[j]) +
+      scale_color_manual(values=darklist[j], guide=FALSE) +
+      labs(x="Longitude", y="Latitude")
+    hist[[j]] <- createhist(histdat, ag_list, j, lightlist, darklist)
+  }
+  fname = paste(i,".png", sep="")
+  plot<-grid.arrange(hist[[1]], hist[[2]], hist[[3]], map[[1]], map[[2]], map[[3]], hist[[4]], hist[[5]], hist[[6]],
+             map[[4]], map[[5]], map[[6]], ncol=3, nrow=4, heights=c(1,3,1,3), widths=c(2,2,2))
+  ggsave(plot, file=fname)
+}
+
+```
+
+```{r, echo=F, eval=F}
+#deprecated
+
+histdat <- test %>% filter(Agency=="HPD")
+mapdat <- ag_dat %>% filter(hour == i, Agency=="HPD")
+map2 <- ggmap(NY, base_layer = ggplot(data = mapdat, aes(x=lon, y=lat, color=Agency))) +
+  geom_point(alpha=0.1) +
+  scale_color_manual(values = darklist[2], guide=FALSE) +
+  labs(x="Longitude", y="Latitude")
+map2
+c2 <- ggplot(histdat, aes(x=factor(hour), y=count, fill=(hour==i))) +
+  geom_bar(stat="identity", color="black") +
+  scale_fill_manual(name="",values=c(lightlist[2], darklist[2]), guide=F) +
+  labs(x="Frequency", y="Hour", title="HPD")
+c2
+
+grid.arrange(c, map, c2, map2, ncol=1, nrow=4, heights=c(1,3,1,3))
+```
+
+```{r, echo=F}
+nyc_fips <- c(36005, 36047, 36061, 36081, 36085)
+ziplist <- zip.regions %>% filter(county.fips.numeric %in% nyc_fips) %>% select(region)
+ziplist <- as.vector(ziplist$region)
+
+mat <- sub %>% filter(Incident.Zip %in% ziplist, Created.Date < '2015-01-01') %>% group_by(Complaint.Type, date, Incident.Zip) %>% summarise(count=n()) %>% arrange(-count)
+mat <- na.omit(mat)
+
+pred_choro <- function(complaint, alpha, df) {
+  test <- mat %>% filter(Complaint.Type==complaint, date != "02/29")
+  castmat <- dcast(test, date~Incident.Zip)
+  castmat[is.na(castmat)] <- 0
+  probmat <- castmat[,-1]
+  rsums = rowSums(probmat)+(alpha*dim(probmat)[2])
+  probmat <- as.matrix((probmat+alpha)/(rsums))
+  probmat <- probmat/rowSums(probmat)
+
+  preds <- as.data.frame(t(df$count %*% probmat))
+  preds$region <- rownames(preds)
+  names(preds)[1] <- "prediction"
+  #preds$Complaint.Type <- "Taxi Complaints"
+  preds <- na.omit(left_join(preds,df_pop_zip, by=c("region"="region")))
+  preds <- preds %>% mutate(value = prediction/pop)
+  
+  #zip_choro_type("Taxi Complaints", filt_dat2)
+  #zip_choro_type("Taxi Complaints", preds)
+  
+  nyc_fips = c(36005, 36047, 36061, 36081, 36085)
+  
+  name = paste("Predicted", complaint, "Complaints")
+  fname = paste(name,".png", sep="")
+  
+  choro = ZipChoropleth$new(preds)
+  choro$title = name
+  choro$ggplot_scale = scale_fill_brewer(name="Complaints per Capita", palette="YlOrRd", drop=FALSE, na.value="white")
+  choro$set_zoom_zip(state_zoom=NULL, county_zoom=nyc_fips, msa_zoom=NULL, zip_zoom=NULL)
+  choro$render()
+  #ggsave(fname)
+}
+```
+
+```{r, echo=F}
+setwd("C:\\Users\\Daniel\\Desktop\\CU\\Data Viz\\Assignment 4")
+pred_dat <- read.csv("ComplaintTS_forDKS.csv")
+
+get_alpha <- function(complaint,i) {
+  
+  test <- mat %>% filter(Complaint.Type==complaint)
+  castmat <- dcast(test, date~Incident.Zip)
+  castmat[is.na(castmat)] <- 0
+
+  error=c()
+  for (alpha in i) {
+    probmat <- castmat[,-1]
+    rsums = rowSums(probmat)+(alpha*dim(probmat)[2])
+    probmat <- as.matrix((probmat+alpha)/(rsums))
+    probmat <- probmat/rowSums(probmat)
+    test2 <- sub %>% filter(Complaint.Type==complaint, Created.Date >= '2015-01-01') %>% group_by(date) %>% summarise(count=n())
+    pred_df <- as.data.frame(t(test2$count %*% probmat))
+    
+    names(pred_df)[1] <- "prediction"
+    testing <- filt_dat2 %>% filter(Complaint.Type==complaint)
+    pred_df$region <- rownames(pred_df)
+    pred_df <- na.omit(left_join(pred_df,testing, by=c("region"="region")))
+    colnames(pred_df)[4] <- "old.count"
+    error = append(error,mean((pred_df$prediction-pred_df$old.count)^2))
+    pred_df$value <- abs(pred_df$prediction-pred_df$old.count)/pred_df$old.count
+    t2 <- pred_df %>% filter(old.count > 10)
+    e2 = mean((t2$prediction-t2$old.count)^2)
+    #print(e)
+    #print(e2)
+  }
+  
+  err <- as.data.frame(error)
+  err$alpha <- i
+  
+  p<-ggplot(err, aes(x=alpha, y=error))+
+    geom_point() +
+    labs(x="Alpha", y="Error", title=paste("Alpha vs. Error for", complaint)) +
+    theme_bw()
+  fname = paste("Alpha_Error_",complaint,".png", sep="")
+  print(p)
+  #ggsave(fname, p)
+}
+
+
+diff_choro <- function(complaint, alpha) {
+  outs <- list()
+  test <- mat %>% filter(Complaint.Type==complaint, date != "02/29")
+  castmat <- dcast(test, date~Incident.Zip)
+  castmat[is.na(castmat)] <- 0
+  probmat <- castmat[,-1]
+  rsums = rowSums(probmat)+(alpha*dim(probmat)[2])
+  probmat <- as.matrix((probmat+alpha)/(rsums))
+  probmat <- probmat/rowSums(probmat)
+  test2 <- sub %>% filter(Complaint.Type==complaint, Created.Date >= '2015-01-01', date != "02/29") %>% group_by(date) %>% summarise(count=n())
+  pred_df <- as.data.frame(t(test2$count %*% probmat))
+  
+  names(pred_df)[1] <- "prediction"
+  
+  testing <- filt_dat2 %>% filter(Complaint.Type==complaint)
+  pred_df$region <- rownames(pred_df)
+  pred_df <- na.omit(left_join(pred_df,testing, by=c("region"="region")))
+  colnames(pred_df)[4] <- "old.count"
+  pred_df$value <- abs(pred_df$prediction-pred_df$old.count)/pred_df$old.count
+
+  nyc_fips = c(36005, 36047, 36061, 36081, 36085)
+  
+  name = paste("Difference in", complaint, "Complaints")
+  fname = paste(name,".png", sep="")
+  choro = ZipChoropleth$new(pred_df)
+  choro$set_num_colors(9)
+  choro$title = name
+  choro$ggplot_scale = scale_fill_brewer(name="Error", palette="PuBu", drop=FALSE, na.value="white")
+  choro$set_zoom_zip(state_zoom=NULL, county_zoom=nyc_fips, msa_zoom=NULL, zip_zoom=NULL)
+  outs[[1]]<-choro$render()
+  outs[[2]]<-pred_df
+  #ggsave(fname)
+  return(outs)
+}
+
+plot_error <- function(complaint,pred_df) {
+  c<-ggplot(pred_df, aes(x=old.count, y=value))+
+    geom_point() +
+    labs(x="Observed number of complaints", y="Error", title=paste("Error Rate vs. Observed Number of", complaint, "Complaints")) +
+    theme_bw()
+  print(c)
+  fname = paste(complaint,"error.png")
+  #ggsave(fname, c)
+}
+
+# alpha values: Noise:0.95, PLUMBING, 2.6, Taxi Complaint: 0.7
+
+complaint_preds = read.csv("ComplaintTS_forDKS.csv")
+# 2 is taxi, 4 is plumbing, 6 is noise
+names(complaint_preds)[6] <- "count"
+```
+
+As an extension to the random forest regression model, we decided to investigate how complaints are distributed across the different zip codes of New York City. To try and predict this, we created a matrix with dates (January 1st to December 31st) as rows and zip codes as columns, where each entry corresponded to the probability of a specific complaint type being in that zip region on a specific day of the year. Laplace smoothing was then added to ensure that the probability of a new complaint occuring in a given region is never zero. The probability matrix was then multiplied by the predicted volume of complaints given by the random forest model to obtain the distribution of complaints by zip code. To validate the model, we used 2010-2014 as training data and 2015 complaints as test data. Three complaint types were randomly selected to gauge how our model fares: Taxi complaints, noise and plumbing complaints. For each of the three complaint types, three different choropleth maps were produced: one shows the actual distribution of complaints in 2015, the next shows the predicted distribution of complaints in 2015 and the last shows the difference between the two (i.e. where our model did less well).
+
+## Noise Complaints
+
+```{r, echo=F, warning=F}
+zip_choro_type("Noise", filt_dat2)
+pred_choro("Noise",0.95,complaint_preds)
+df1 <- diff_choro("Noise",0.95)
+df1[[1]]
+```
+
+The majority of the noise complaints that occur in New York city are concentrated in Manhattan, which is captured on the predicted map. The difference choropleth map also shows that the prediction fared well around the areas where there are many noise complaints.
+
+## Taxi Complaints
+
+```{r, echo=F, warning=F}
+zip_choro_type("Taxi Complaint", filt_dat2)
+pred_choro("Taxi Complaint",0.7,complaint_preds)
+df3 <- diff_choro("Taxi Complaint",0.7)
+df3[[1]]
+```
+
+The majority of the taxi complaints that occur in New York city are concentrated around Manhattan, which is also captured on the predicted map. The difference choropleth map also shows that the prediction fared well around the areas where there are many taxi complaints.
+
+## Plumbing Complaints
+
+```{r, echo=F, warning=F}
+zip_choro_type("PLUMBING", filt_dat2)
+pred_choro("PLUMBING",2.6,complaint_preds)
+df2 <- diff_choro("PLUMBING",2.6)
+df2[[1]]
+```
+
+The majority of the plumbing complaints that occur in New York city are concentrated around Brooklyn and the Bronx, which is also captured on the predicted map. The difference choropleth map also shows that the prediction fared well around the areas where there were the most Plumbing complaints.
+
+In addition to the three choropleth maps, two scatterplots are displayed below: one shows the error rate of the model based on the number of observations and the other displayes how we changed the smoothing parameter to minimize the mean squared error of the model.
+
+```{r, echo=F, warning=F}
+
+plot_error("Noise", df1[[2]])
+i <- seq(0.25,1.25,0.05)
+get_alpha("Noise",i)
+
+plot_error("Taxi Complaint", df3[[2]])
+i <- seq(0.05,1.25,0.05)
+get_alpha("Taxi Complaint",i)
+
+plot_error("PLUMBING", df2[[2]])
+i <- seq(1.5,3.5,0.1)
+get_alpha("PLUMBING",i)
+```
+
+As is shown above, our model fares very well overall, but seems to be very volatile when the number of observations in a specific region is small. In regions where a large numer of complaints were observed, (i.e. taxi complaints in Manhattan) the model is very accurate and the performace is clearly outlined by comparing the blue choropleth map to the actual number of observed complaints.
+
+```{r, echo=F, eval=F}
+map <- leaflet(leaf_dat) %>% addTiles() %>% 
+  addMarkers(~lon, ~lat, clusterOptions = markerClusterOptions(), icon=makeIcon("police_hat.png", 18,18), popup=~Complaint.Type)
+map
+```
+
+```{r, echo=F, eval=F}
+setwd("C:\\Users\\Daniel\\Desktop\\CU\\Data Viz\\Assignment 4")
+weather <- read.csv("weather.csv")
+weather$Date <- as.Date(weather$Date, format = "%Y-%m-%d")
+
+unique(weather$Events)
+
+```
+
+```{r, echo=F, eval=F}
+setwd("C:\\Users\\Daniel\\Desktop\\CU\\Data Viz\\Assignment 4")
+cormatrix <- read.csv("CorrMatTop70.csv")
+cormat <- as.matrix(cormatrix[,-1])
+
+loads <- as.data.frame(unclass(factanal(covmat = cormat, factors=5)$loadings))
+loads$categories <- cormatrix[,1]
+write.csv(loads,"Factors.csv")
+```

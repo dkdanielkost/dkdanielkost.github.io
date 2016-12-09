@@ -1,0 +1,480 @@
+---
+title: "Predictive Analysis of 311 Data"
+author: "Drop_db"
+date: "May 8, 2016"
+output: html_document
+---
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+rm(list=ls())
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lubridate)
+library(class)
+library(timeDate)
+library(randomForest)
+
+filePath <- "C:/Users/SONY/Desktop/Data Visualization/final project/writeup_combined"
+
+```
+
+## Motivation
+
+If we take a high level view of the New York 311 Call Data there are a dizzing array of ways to slice and organize the data. This stymies the goal of prediction until an appropriate direction is taken. Perhaps one natural and endogenous variable to attempt to predict is the call volume on a temporal and geospatial scale. Our team created a relatively simplistic approach to build some intuition as to what influence total call volumes. our analyses were influenced by the work of Zha and Veloso 2014 who successfully applied a Random Forest approach.
+
+Our preliminary regression analysis revolved around predicting call volume on a given day and to train our models we used as predictors 1) the total call volume of the past 7 days (*numeric*), 2) Day of the Week (*categorical*), 3) Snow Days (*boolean*), 4) inches of precipitation (*numeric*), 5) mean temperature on the day (*numeric*), 6) range of temperature on the day (*numeric*), 7) public holidays (*boolean*), 8) bank holidays (*boolean*)
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+#--------------------------------------------------------------
+# 0. Load the data
+#--------------------------------------------------------------
+#Load the data
+#setwd(dir = "C:/Users/Daniel/Documents/Columbia/2016 Spring/STAT W4701/Final")
+#load(paste(getwd(),"Data311micro.RData",sep="/"))
+load(paste(filePath,"Data311micro.RData",sep="/"))
+Data311[ ,Created.Date := as.Date(Created.Date)]
+Data311[ ,Closed.Date := as.Date(Closed.Date)]
+Data311[ ,Year := year(Created.Date)]
+Data311[,Date := as.Date(Created.Date)]
+Data311 <- Data311[!is.na(Data311$Created.Date),]
+
+startYear <- 2011
+endYear <- 2015
+
+```
+
+### Linear Regression
+
+Naively, we attempted to fit a linear model to gauge the out-of-the-box efficacy of these predictors. This model was run by a few agencies and we run the model with and without Day of the Week. This will highlight the strong power of this predictor and also reveals that the linear model is perhaps not the best approach to exploring the structure of our data.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+#weather <- fread(paste(getwd(),"weather.csv",sep="/"))
+weather <- fread(paste(filePath,"weather.csv",sep="/"))
+weather[, Date := as.Date(Date, "%m/%d/%Y")]
+weather[PrecipitationIn == "T", PrecipitationIn := 0.0]
+weather$PrecipitationIn <- as.numeric(as.character(weather$PrecipitationIn))
+weather$Events <- as.factor(weather$Events)
+
+# Scale the Data
+weather[, RangeTempScale := scale(MaxTemperatureF - MinTemperatureF, T, T)]
+weather[, PrecipitationScale := scale(PrecipitationIn, T, T)]
+weather[, MeanTempScale := scale(MeanTemperatureF, T, T)]
+
+
+# Top Agencies
+AgencyVolume <- Data311[,.(AllComplaints = length(ID)), by=.(Agency)]
+RegressionAgency <- AgencyVolume[order(AllComplaints, decreasing=TRUE)]$Agency[1:10]
+
+Volume <- Data311[,.(Volume = length(ID)), by=.(Agency, Date)]
+Volume[, Weekday := weekdays(Date)]
+Volume$Weekday <- as.factor(Volume$Weekday)
+
+AGENCY <- c()
+RSQ <- c()
+DOW <- c()
+for(i in 1:length(RegressionAgency)){
+  agency <- RegressionAgency[i]
+  X <- Volume[Agency == agency,]
+  X <- merge(X, weather, by = "Date")
+  
+  model1 <- lm(Volume ~ MeanTempScale + RangeTempScale + Weekday + PrecipitationScale, data = X)
+  model2 <- lm(Volume ~ MeanTempScale + RangeTempScale + PrecipitationScale, data = X)
+  RSQ <- c(RSQ, summary(model1)$r.sq)
+  RSQ <- c(RSQ, summary(model2)$r.sq)
+  AGENCY <- c(AGENCY, agency)
+  AGENCY <- c(AGENCY, agency)
+  DOW <- c(DOW, "Y")
+  DOW <- c(DOW, "N")
+}
+
+df <- data.frame(AGENCY,RSQ,DOW)
+df <- df[with(df, order(-DOW,-RSQ)),]
+p1 <- ggplot(df, aes(AGENCY,RSQ, fill=DOW))+geom_bar(stat="identity",position="dodge")
+p1 <- p1 + ggtitle("R-squared of Linear Model by Agency")
+show(p1)
+```
+
+A clear takeaway is that the inclusion of the *categorical* variable, Day of the Week, has a great amount of predictive power. Nonetheless, we are discouraged by the use of a linear model for prediction. It seems that a more granular approach is required.
+
+### Random Forest
+
+In the work by Zha and Veloso, 2014, the authors had considerable success adopting a Random Forest approach to predicting call volumes. The Random Forest is a pseudo-bootstrap approach over the observed samples to train a predefined number of decision trees. We use decision tree regressors and the forest will then the mean of all the predictions by our constituent trees. In the following sections, our trees are trained over data from 2010 to 2014 and then tested against the observed data in 2015.
+
+#### Single Batch Forest
+
+At first, we train our forest over all call volume in one batch. This has reasonable success but is still somewhat unsatisfactory. As can be seen in the graph below, when the tree is trained over the aggregate data it reveals some clustering in the data but also fails to accurately adjust for this.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+startYear <- 2011
+endYear <- 2015
+
+#--------------------------------------------------------------
+# 1a. Load the Weather data over the period 2011 - 2015
+#--------------------------------------------------------------
+#weather <- fread(paste(getwd(),"weather.csv",sep="/"))
+weather <- fread(paste(filePath,"weather.csv",sep="/"))
+weather[, Date := as.Date(Date, "%m/%d/%Y")]
+weather$PrecipitationIn <- as.numeric(as.character(weather$PrecipitationIn))
+weather[is.na(PrecipitationIn), PrecipitationIn := 0.0]
+weather[, Events := as.factor(weather$Events)]
+
+#--------------------------------------------------------------
+# 1b. Create a Vector of the Public Holidays in NYC
+#--------------------------------------------------------------
+publicHolidays <- c("USNewYearsDay", "USInaugurationDay", "USMLKingsBirthday", "USLincolnsBirthday", "USWashingtonsBirthday",
+                    "USMemorialDay", "USIndependenceDay", "USLaborDay", "USColumbusDay", "USElectionDay",
+                    "USVeteransDay", "USThanksgivingDay", "USChristmasDay", "USCPulaskisBirthday", "USGoodFriday")
+
+weather[, isPublicHoliday := 0]
+for(y in startYear:endYear){
+  for(i in 1:length(publicHolidays)){
+    d <- as.Date(holiday(year = y, Holiday = publicHolidays[i]))
+    weather[Date == d, isPublicHoliday := 1]
+  }
+}
+
+#--------------------------------------------------------------
+# 1c. Create a Vector of the NYSE Holidays
+#--------------------------------------------------------------
+bankHoliday <- as.Date(holidayNYSE(2011:2015))
+weather[, isBankHoliday := 0]
+for(i in 1:length(bankHoliday)){
+  weather[Date == bankHoliday[i], isBankHoliday := 1]
+}
+
+#--------------------------------------------------------------
+# 1d. Add other columns that are possibly predictive
+#--------------------------------------------------------------
+weather[, DoW := weekdays(Date)]
+weather[, TempRange := as.numeric(MaxTemperatureF - MinTemperatureF)]
+weather[, TempMean := as.numeric(MeanTemperatureF)]
+weather[, PrecipIn := as.numeric(PrecipitationIn)]
+snowFlag <- grep("snow", weather$Events, ignore.case = T)
+weather[, isSnow := 0]
+weather[snowFlag, isSnow := 1]
+
+#--------------------------------------------------------------
+# 1e. Subset the Weather Predictors
+#--------------------------------------------------------------
+weatherPredictors <- weather[, .(Date, TempMean, TempRange, PrecipIn, isSnow, DoW, isPublicHoliday, isBankHoliday)]
+Factors <- weatherPredictors
+
+#--------------------------------------------------------------
+# 2. Define a Function: RainForest
+#     This function takes 3 arguments
+#     1. X - Representing an arbitrary subset of the 311 data
+#            Assumed to be a Data.Table with column Date
+#     2. Factors - Follow up Data Table with weather features
+#            and potentially other features for use
+#     3. ntree - An integer specifying the number of trees to use
+#
+#     Returns: 1) a tree object trained over years before 2015 
+#              2) its predictions on the year 2015 
+#              3) the true volume
+#              4) mse
+#--------------------------------------------------------------
+RainForestBase <- function(X, Factors, ntree=500){
+  ## Assume that X is just the data used to train the tree ##
+  ## Just returns the tree for later use in prediction     ##
+  
+  # Define interval around target date
+  delta.time.mask <- function(d0, dp=0, dm=7){
+    return(interval(d0 + ddays(dm), d0 + ddays(dp)))
+  }
+  
+  #Extract the Trailing Week's Volume for a given Day
+  X <- X[, .(Volume=length(ID)), by=.(Date)]
+  X <- X[, .(Date, Volume)]
+  TWV <- rep(0, dim(X)[1])
+  for (i in 1:dim(X)[1])
+  {
+    d <- X$Date[i]
+    TWV[i] <- sum(X[X$Date%within%delta.time.mask(d,-1,-7)]$Volume)
+  }
+  
+  # Append Trailing Volume
+  X[, TWV := as.numeric(TWV)]
+  X[, Volume := as.numeric(Volume)]
+  
+  # Append External Predictors
+  X <- merge(X, Factors, by.x = "Date", by.y = "Date")
+  X[, isSnow := as.factor(isSnow)]
+  X[, isPublicHoliday := as.factor(isPublicHoliday)]
+  X[, isBankHoliday := as.factor(isBankHoliday)]
+  X[, DoW := as.factor(DoW)]
+  
+  #Train the tree
+  X.rf <- randomForest(Volume ~ ., data = select(X, -Date, -Year), ntree=ntree)
+  return(list(rForest=X.rf, pred=X.pred, label=X.test$Volume, mse=mse))
+}
+
+
+RainForest <- function(X, Factors, ntree=500, correctBias=TRUE){
+  
+  # Define interval around target date
+  delta.time.mask <- function(d0, dp=0, dm=7){
+    return(interval(d0 + ddays(dm), d0 + ddays(dp)))
+  }
+  
+  #Extract the Trailing Week's Volume for a given Day
+  X <- X[, .(Volume=length(ID)), by=.(Date)]
+  X <- X[, .(Date, Volume)]
+  TWV <- rep(0, dim(X)[1])
+  for (i in 1:dim(X)[1])
+  {
+    d <- X$Date[i]
+    TWV[i] <- sum(X[X$Date%within%delta.time.mask(d,-1,-7)]$Volume)
+  }
+  
+  # Append Trailing Volume
+  X[, TWV := as.numeric(TWV)]
+  X[, Volume := as.numeric(Volume)]
+  
+  # Append External Predictors
+  X <- merge(X, Factors, by.x = "Date", by.y = "Date")
+  X[, isSnow := as.factor(isSnow)]
+  X[, isPublicHoliday := as.factor(isPublicHoliday)]
+  X[, isBankHoliday := as.factor(isBankHoliday)]
+  X[, DoW := as.factor(DoW)]
+  
+  #Train the tree
+  X[,Year := year(Date)]
+  X.train <- X[Year < 2015,]
+  X.test <- X[Year == 2015,]
+  X.rf <- randomForest(Volume ~ ., data = select(X.train, -Date, -Year), ntree=ntree, corr.bias=correctBias)
+  
+  #Apply the Tree
+  X.pred <- predict(X.rf, select(X.test, -Date, -Year))
+  mse <- mean((X.test$Volume - X.pred)^2)
+  
+  return(list(rForest=X.rf, pred=X.pred, label=X.test$Volume, mse=mse))
+}
+
+vol.rf <- RainForest(Data311, Factors, 500)
+
+
+p2 <- ggplot(aes(y=actual, x=pred),
+            data=data.frame(actual=vol.rf$label, pred=vol.rf$pred))
+p2 <- p2 + geom_point() + geom_abline(color="red") +
+     ggtitle("RandomForest Regression - Batch Data - 500 Trees") +
+  labs(y="Observed Call Volume", x="Predicted Call Volume")
+show(p2)
+
+```
+
+Even before performing a random forest regression, this plot shows that the call volume itself exhibits some clustering around the 3,500 and 6,000 daily call ranges. In addition to the clusters, we can see that the forest some difficulty in predicting the extreme values of the distribution
+
+#### Feature Importance
+
+One of the advantage of the randomForest package in R is that we can very easily explore the added value of each predictor. This value is typically measured in one of two ways. How much does the mean accuracy on the test data decrease if we remove the predictor? How much does impurity (multi-class representation) happen in the nodes if we remove the predictor? Node purity, while a potential flag for overfitting if abused, is a sign that the tree is mature for prediction.
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+varImpPlot(vol.rf$rForest, main="Batch Random Forest - Feature Importance")
+```
+
+This feature importance highlights that 311 exhibits what we might call a "Call-center" phenomenon. The day of the week is paramount to predicting the volume on that day. Next most important is TWV, Trailing Week's Volume, demonstrating a strong auto-regressive property of this data.
+
+#### Complaint Type Aggregate Reconstruction
+
+At this point, one may correctly question why we should expect all complaints in NYC to behave in a consistent fashion under our predictors. While these features may indeed be quite explanatory, their interactions may differ accross agency or complaint type. In this section, we train a random forest of 250 trees on each of the top 50 complaint types by observed call volume. Then our total daily prediction is the sum of each of the 50 daily predictions.
+
+
+```{r, echo=FALSE, warning=FALSE}
+
+#--------------------------------------------------------------
+# 3a. Predict by Complaint Type
+#--------------------------------------------------------------
+nC <- 50
+
+majorComplaints <- Data311[, .(Volume=length(ID)), by=.(Complaint.Type)]
+majorComplaints <- majorComplaints[order(Volume, decreasing = T)]$Complaint.Type[1:nC]
+
+predVolume <- rep(0, 365)
+trueVolume <- rep(0, 365)
+MSE <- rep(0, nC)
+for(i in 1:nC){
+  Dc <- Data311[Complaint.Type == majorComplaints[i],]
+  if(dim(Dc[Year == 2015,])[1] > 0){
+    rforest <- RainForest(Dc, Factors, 250)
+    predVolume <- predVolume + rforest$pred
+    trueVolume <- trueVolume + rforest$label
+    MSE[i] <- rforest$mse
+  }
+}
+
+#--------------------------------------------------------------
+# 3b. Plot
+#--------------------------------------------------------------
+Date <- seq(as.Date("2015-01-01"), as.Date("2015-12-31"), by="days")
+predVolume <- as.vector(predVolume)
+trueVolume <- as.vector(trueVolume)
+df <- data.frame(Date,trueVolume,predVolume)
+df <- melt(df, id="Date")
+
+p3 <- ggplot(data = df, aes(x=Date, y=value, group=variable))
+p3 <- p3 + geom_line(aes(color=variable))
+p3 <- p3 + labs(x="Date", y="Call Volume") + ggtitle("Random Forest - Top 50 Complaint Types - 250 Trees")
+show(p3)
+```
+
+
+We can see how the random forests, when trained over a more selective data set are able to better identify repeatable patterns in the data. The built up index of total call volume is reasonably well predicted now by the composite trees themselves! While the built-up aggregate predictor still has difficulty with these extreme days, the day-to-day fluctuations are well understood by the forests. This behavior is reflective of random forest's tendency to regress towards the mean. While we were able to successfully correct the bias in our regressions, the trees will still continue to have a difficult time finding the structure for such extremities. One might consider a copula method or some density estimation to quantify the return periods of these events.
+
+
+```{r, echo=FALSE, warning=FALSE}
+p4 <- ggplot(data = data.frame(X=trueVolume, Y=predVolume), aes(x=X,y=Y))
+p4 <- p4 + geom_point()
+p4 <- p4 + geom_smooth(method = "lm")
+p4 <- p4 + labs(x="Observed Volume", y="Predicted Volume") + ggtitle("311 Call Volume Reconstructed")
+show(p4)
+```
+
+If we run a simple OLS over a winsored version of the data we find a very encouraging R-squared and a coefficient relating fitted to observed.
+
+```{r}
+ind <- trueVolume > 2500 & trueVolume < 7500
+summary(lm(Y ~ X, data.frame(Y=trueVolume[ind], X=predVolume[ind])))
+
+```
+
+
+### Feature Reduction
+
+The problem of generating 50 or even more trees to make a single days prediction, while possible, is perhaps unrefined. The data itself suggests that there may be strong correlations between complaint type and how they manifest in call volumes. In this section, we use visual explorations of the the correlation matrix and EFA to hone in on certain complaint types which may be best considered as one group.
+
+#### Exploring Correlations of Call Volume
+
+To expand our scope before honing in on potential macro-structures, we present the correlation matrix for the top 70 of 255 complaint types. Ordering the matrix hierarchically we it becomes apparent that there are about 5-7 strongly linked groups or factors ranging in size from 2 to 10 or so complaint types.
+
+```{r, echo=FALSE, warning=FALSE, include=FALSE}
+library(corrplot)
+library(reshape)
+library(reshape2)
+nC <- 70
+
+majorComplaints <- Data311[, .(Volume=length(ID)), by=.(Complaint.Type)]
+majorComplaints <- majorComplaints[order(Volume, decreasing = T)][1:nC]
+
+X <- merge(Data311, majorComplaints, by = "Complaint.Type")
+X <- X[, .(Volume=length(ID)), by=.(Date, Complaint.Type)]
+
+Y <- cast(X, Date ~ Complaint.Type)
+Y[is.na(Y)] <- 0
+```
+
+```{r, echo=FALSE, warning=FALSE}
+C <- cor(select(Y, -Date))
+corrplot(C, tl.pos="n", method="square", order="hclust", title="Hierarchical Clustering of Top 70 Complaints")
+
+```
+
+The eye is naturally drawn to a few clusterd factors but it is also apparent that 3 complaints are strong anti-correlated to the several factors. *NONCONST*,  *GENERAL CONSTRUCTION*, and 	*PAINT - PLASTER* are all strongly correleted amongst themselves but negatively correlated with a group of complaint types including *PAINT/PLASTER*. Both of these are labels used by the Agency HPD, which may be explained by the use of labels on alternating days introducing an anti-correlation. However other complaint types are unique by Agency regardless of similar sounding complaints.
+
+#### Exploratory Factor Analysis on Call Volume
+
+Using the Promax rotation, we generate 4 factors from an EFA on the data matrix of the top 70 complaint types. The leading factor captures 19% of the variance is its largest components are associated with the Agency HPD centering around complaints related to a specific unit or the conditions of the living space. These include Heat hot water, safety, animal abuse, floor/stair, and door/window. The next factor captures 16.5% of the variance. This factor is driven mainly by the HPD and DOB but it seems to be associated with the complaints of the infrastructural aspects of a building or living conditions. The third factor, tying in 10.3% of the variance, has componets related to dead trees, public space maintainence and NYPD noise complaints. The last key factor has a decreased contribution of total variance, only 6.2%. Furthermore, this factor is much less interpretable and is linked to literature requests. Beyond these four factors, the contribution to variance falls off quickly.
+
+```{r, echo=FALSE, warning=FALSE}
+library(reshape)
+library(plotly)
+#--------------------------------------------------------------
+# Exploratory Factor Analysis 
+#--------------------------------------------------------------
+nC <- 70
+
+majorComplaints <- Data311[, .(Volume=length(ID)), by=.(Complaint.Type)]
+majorComplaints <- majorComplaints[order(Volume, decreasing = T)][1:nC]
+
+X <- merge(Data311, majorComplaints, by = "Complaint.Type")
+X <- X[, .(Volume=length(ID)), by=.(Date, Complaint.Type)]
+
+Y <- cast(X, Date ~ Complaint.Type)
+Y[is.na(Y)] <- 0
+
+
+Y.cov <- cov(select(Y,-Date))
+EFA <- factanal(covmat = Y.cov, factors = 5, rotation = "varimax")
+EFA <- as.data.frame(unclass(EFA$loadings))
+EFA$Complaint.Type <- rownames(EFA)
+EFA <- melt(EFA)
+
+agencyMap <- unique(Data311[,.(Agency, Complaint.Type)])
+EFA <- merge(EFA, agencyMap, by="Complaint.Type")
+EFA$Text <- paste0("Agency: ", EFA$Agency, " - Complaint: ", EFA$Complaint.Type)
+
+Fac1 <- EFA[EFA$variable=="Factor1",]
+Fac2 <- EFA[EFA$variable=="Factor2",]
+Fac3 <- EFA[EFA$variable=="Factor3",]
+Fac4 <- EFA[EFA$variable=="Factor4",]
+
+Fac1 <- Fac1[order(Fac1$value, decreasing = T),]
+Fac2 <- Fac2[order(Fac2$value, decreasing = T),]
+Fac3 <- Fac3[order(Fac3$value, decreasing = T),]
+Fac4 <- Fac4[order(Fac4$value, decreasing = T),]
+
+EFA <- rbind(Fac1, rbind(Fac2, rbind(Fac3, Fac4)))
+p<- plot_ly(data = EFA, 
+        y=value, 
+        color=variable, 
+        text=Text, 
+        size=abs(value), 
+        mode="markers") %>% layout(title = "Exploratory Factor Analysis",
+                                   xaxis = list(title="Index - Sorted for each Factor"), 
+                                   yaxis = list(title="Loading"))
+p
+
+```
+
+
+We have reasonably good agreement between the EFA and the clustered factors from the Correlation matrix. Both of these approaches quickly pull out groupings that are related to housing both within the apartment and in the building itself as well as the public space where pedestrians usual walk.
+
+#### Random Forest Reconstructions on Groupings
+
+Using the correlation matrix to guide some intuitive groupings we attempted to reconstruct call volume on a reduced set of "meta" complaint types. The graph below represents a random forest being trained on whole subsets of complaints that are deemed highly correlated. We can see that forgoing the process of training on every single complaint type is not very detrimental to our overall predictive performance.
+
+
+```{r, echo=FALSE, warning=FALSE}
+metaComplaints <- fread(paste(filePath, "MetaComplaints.csv", sep="/"))
+
+metaComplaints <- select(metaComplaints, -Agency)
+X <- merge(Data311, metaComplaints, by = "Complaint.Type")
+nF <- length(unique(metaComplaints$Group))
+
+predVolume <- rep(0, 365)
+trueVolume <- rep(0, 365)
+MSE <- rep(0, nF)
+for(i in 1:nF){
+  Dc <- X[Group == i, ]
+  if(dim(Dc[Year == 2015,])[1] > 0){
+
+    rforest <- RainForest(Dc, Factors, 300)
+    predVolume <- predVolume + rforest$pred
+    trueVolume <- trueVolume + rforest$label
+    MSE[i] <- rforest$mse
+  }
+}
+
+Date <- seq(as.Date("2015-01-01"), as.Date("2015-12-31"), by="days")
+predVolume <- as.vector(predVolume)
+trueVolume <- as.vector(trueVolume)
+df <- data.frame(Date,trueVolume,predVolume)
+df <- melt(df, id="Date")
+
+p2 <- ggplot(data = df, aes(x=Date, y=value, group=variable))
+p2 <- p2 + geom_line(aes(color=variable))
+p2 <- p2 + labs(x="Date", y="Call Volume") + ggtitle("Random Forest - 7 Clustered Complaint Types - 300 Trees")
+show(p2)
+
+```
+
+#### References
+
+Zha, Yilong and Manuela Veloso. "Profiling and Prediction of     Non-Emergency Calls in New York City." Association for the   Advancement of Artificial Intelligence, 2014: 41-47. Print
+
+Zhang, Guoyi and Yan Lu. "Bias-corrected random forests in regression." Journal of Applied Statistics. 19 May 2011
+
